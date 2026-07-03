@@ -1,0 +1,749 @@
+#!/usr/bin/env python3
+import os
+import subprocess
+import sys
+import threading
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from crypto import encrypt_password, decrypt_password
+from db import init_db, add_connection, update_connection, delete_connection, get_connection, list_connections, add_port_forward, update_port_forward, delete_port_forward, get_port_forwards
+from parser import parse_ssh_command, build_ssh_command
+
+
+# Theme colors (Catppuccin Mocha inspired)
+THEME = {
+    "bg": "#ffffff",
+    "fg": "#1a1a2e",
+    "select": "#e8f0fe",
+    "accent": "#4f6ef7",
+    "accent_fg": "#ffffff",
+    "tree_bg": "#f8f9fc",
+    "tree_fg": "#1a1a2e",
+    "tree_sel": "#dce5ff",
+    "header_bg": "#f0f2f5",
+    "btn_bg": "#4f6ef7",
+    "btn_fg": "#ffffff",
+    "success": "#2ecc71",
+    "error": "#e74c3c",
+    "border": "#dfe3e8",
+}
+
+
+CN = {
+    "port_forward": "端口转发",
+    "forward_name": "转发名称",
+    "forward_type": "转发类型",
+    "listen_port": "监听端口",
+    "dest_host": "目标主机",
+    "dest_port": "目标端口",
+    "new_conn": "新建连接",
+    "edit_conn": "编辑连接",
+    "connection_mgr": "OpenXterm - SSH 连接管理�?,
+    "conn_name": "连接名称:",
+    "host": "主机 / IP:",
+    "port": "端口:",
+    "username": "用户�?",
+    "password": "密码:",
+    "jump_host": "跳板�?可�?:",
+    "jump_user": "跳板用户:",
+    "jump_password": "跳板密码:",
+    "extra_args": "额外参数:",
+    "add_conn": "+ 新建连接",
+    "refresh": "刷新",
+    "connect": "连接",
+    "edit": "编辑",
+    "delete": "删除",
+    "port_forward_mgr": "端口转发",
+    "confirm_delete": "确认删除?",
+    "select_first": "请先选择一个连�?,
+    "required": "主机和用户名为必填字�?,
+    "parse_ssh": "从SSH命令解析",
+    "ssh_from_cmd": "从SSH命令解析",
+    "paste_ssh": "请粘�?SSH 命令字符�?",
+    "parse": "解析",
+    "parse_fail": "无法解析�?SSH 命令",
+    "cancel": "取消",
+    "ok": "确定",
+    "connecting": "正在连接",
+    "connected": "已连�?,
+    "error": "错误",
+    "connect_fail": "连接失败",
+    "tunnel_established": "隧道已建�?,
+    "local": "本地",
+    "remote": "远程",
+    "dynamic": "动�?,
+    "socks": "SOCKS",
+    "add_forward_btn": "+ 添加转发",
+    "onekey_connect": "一键连�?转发",
+    "forward_mgr_title": "端口转发",
+    "conn_mgr_tab": "  连接管理  ",
+    "select_forward_first": "请先选择一个转发规�?,
+    "confirm_del_forward": "确认删除该转发规�?",
+    "port_must_be_num": "端口必须是数�?,
+    "edit_forward": "编辑转发",
+    "del_forward": "删除转发",
+    "ready": "就绪",
+    "total_conns": "�?{} 个连�?,
+    "conn_id": "ID",
+    "conn_name_col": "连接名称",
+    "host_col": "主机",
+    "port_col": "端口",
+    "user_col": "用户�?,
+    "jump_col": "跳板�?,
+    "confirm_del_conn": "确认删除该连�?",
+    "forward_name_col": "名称",
+    "forward_type_col": "类型",
+    "forward_listen_col": "监听",
+    "forward_dest_col": "目标",
+    "tunnel_active": "隧道活跃: {}",
+}
+
+class PortForwardDialog:
+    def __init__(self, parent, connection_id, title=None, fwd=None):
+        if title is None:
+            title = CN["port_forward"]
+        self.conn_id = connection_id
+        self.fwd = fwd
+        self.result = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(title)
+        self.dialog.geometry("500x270")
+        self.dialog.resizable(False, False)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        self.dialog.configure(bg=THEME["bg"])
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TLabel", background=THEME["bg"], foreground=THEME["fg"], font=("Segoe UI", 10))
+        style.configure("TEntry", fieldbackground=THEME["select"], foreground=THEME["fg"], font=("Segoe UI", 10))
+        style.configure("TFrame", background=THEME["bg"])
+
+        main_frame = ttk.Frame(self.dialog, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        row = 0
+
+        ttk.Label(main_frame, text=CN["forward_name"] + ":").grid(row=row, column=0, sticky=tk.W, pady=4)
+        self.name_var = tk.StringVar(value=fwd["name"] if fwd else "")
+        ttk.Entry(main_frame, textvariable=self.name_var, width=35).grid(row=row, column=1, pady=4)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["forward_type"] + ":").grid(row=row, column=0, sticky=tk.W, pady=4)
+        self.type_var = tk.StringVar(value=fwd["forward_type"] if fwd else "L")
+        type_frame = ttk.Frame(main_frame)
+        type_frame.grid(row=row, column=1, sticky=tk.W, pady=4)
+        for tval, tlabel in [("L", CN["local"] + " -L"), ("R", CN["remote"] + " -R"), ("D", CN["dynamic"] + " -D")]:
+            ttk.Radiobutton(type_frame, text=tlabel, variable=self.type_var, value=tval).pack(side=tk.LEFT, padx=3)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["listen_port"] + ":").grid(row=row, column=0, sticky=tk.W, pady=4)
+        self.listen_port_var = tk.StringVar(value=str(fwd["listen_port"]) if fwd else "8080")
+        ttk.Entry(main_frame, textvariable=self.listen_port_var, width=35).grid(row=row, column=1, pady=4)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["dest_host"] + ":").grid(row=row, column=0, sticky=tk.W, pady=4)
+        self.dest_host_var = tk.StringVar(value=fwd["dest_host"] if fwd else "localhost")
+        ttk.Entry(main_frame, textvariable=self.dest_host_var, width=35).grid(row=row, column=1, pady=4)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["dest_port"] + ":").grid(row=row, column=0, sticky=tk.W, pady=4)
+        self.dest_port_var = tk.StringVar(value=str(fwd["dest_port"]) if fwd else "80")
+        ttk.Entry(main_frame, textvariable=self.dest_port_var, width=35).grid(row=row, column=1, pady=4)
+        row += 1
+
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=15)
+        ttk.Button(btn_frame, text=CN["ok"], width=12, command=self.ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text=CN["cancel"], width=12, command=self.cancel).pack(side=tk.LEFT, padx=5)
+        self.dialog.wait_window()
+
+    def collect_data(self):
+        return {
+            "connection_id": self.conn_id,
+            "name": self.name_var.get().strip(),
+            "forward_type": self.type_var.get().strip(),
+            "listen_port": int(self.listen_port_var.get().strip()),
+            "dest_host": self.dest_host_var.get().strip(),
+            "dest_port": int(self.dest_port_var.get().strip()),
+            "listen_host": "127.0.0.1",
+        }
+
+    def ok(self):
+        try:
+            data = self.collect_data()
+            int(data["listen_port"])
+            int(data["dest_port"])
+            self.result = data
+            self.dialog.destroy()
+        except ValueError:
+            messagebox.showerror(CN["error"], CN["port_must_be_num"], parent=self.dialog)
+
+    def cancel(self):
+        self.dialog.destroy()
+
+
+class ConnectionDialog:
+    def __init__(self, parent, title=None, conn=None):
+        if title is None:
+            title = CN["new_conn"]
+        self.conn = conn
+        self.result = None
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(title)
+        self.dialog.geometry("520x500")
+        self.dialog.resizable(False, False)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        self.dialog.configure(bg=THEME["bg"])
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TLabel", background=THEME["bg"], foreground=THEME["fg"], font=("Segoe UI", 10))
+        style.configure("TEntry", fieldbackground=THEME["select"], foreground=THEME["fg"], font=("Segoe UI", 10))
+        style.configure("TFrame", background=THEME["bg"])
+        style.configure("TButton", background=THEME["btn_bg"], foreground=THEME["btn_fg"], font=("Segoe UI", 10))
+        style.configure("TSeparator", background=THEME["border"])
+        style.map("TButton", background=[("active", THEME["accent"])], foreground=[("active", THEME["accent_fg"])])
+
+        main_frame = ttk.Frame(self.dialog, padding=15)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        row = 0
+
+        ttk.Label(main_frame, text=CN["conn_name"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        self.name_var = tk.StringVar(value=conn["name"] if conn else "")
+        ttk.Entry(main_frame, textvariable=self.name_var, width=40).grid(row=row, column=1, pady=3)
+        row += 1
+
+        ttk.Button(main_frame, text=CN["ssh_from_cmd"], command=self.parse_ssh).grid(row=row, column=0, columnspan=2, pady=5)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["host"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        self.host_var = tk.StringVar(value=conn["host"] if conn else "")
+        ttk.Entry(main_frame, textvariable=self.host_var, width=40).grid(row=row, column=1, pady=3)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["port"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        self.port_var = tk.StringVar(value=str(conn["port"]) if conn else "22")
+        ttk.Entry(main_frame, textvariable=self.port_var, width=40).grid(row=row, column=1, pady=3)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["username"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        self.user_var = tk.StringVar(value=conn["username"] if conn else "")
+        ttk.Entry(main_frame, textvariable=self.user_var, width=40).grid(row=row, column=1, pady=3)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["password"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        pwd_frame = ttk.Frame(main_frame)
+        pwd_frame.grid(row=row, column=1, sticky=tk.W, pady=3)
+        self.show_password = tk.BooleanVar(value=False)
+        self.pwd_entry = ttk.Entry(pwd_frame, width=34, show="*")
+        self.pwd_entry.pack(side=tk.LEFT)
+        if conn and conn.get("password"):
+            try:
+                self.pwd_entry.insert(0, decrypt_password(conn["password"]))
+            except Exception:
+                self.pwd_entry.insert(0, "")
+        self.eye_btn = ttk.Button(pwd_frame, text="\u25cf", width=3, command=self.toggle_password)
+        self.eye_btn.pack(side=tk.LEFT, padx=2)
+        row += 1
+
+        ttk.Separator(main_frame, orient=tk.HORIZONTAL).grid(row=row, column=0, columnspan=2, sticky=tk.EW, pady=10)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["jump_host"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        self.jump_host_var = tk.StringVar(value=conn["jump_host"] if conn else "")
+        ttk.Entry(main_frame, textvariable=self.jump_host_var, width=40).grid(row=row, column=1, pady=3)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["jump_user"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        self.jump_user_var = tk.StringVar(value=conn["jump_user"] if conn else "")
+        ttk.Entry(main_frame, textvariable=self.jump_user_var, width=40).grid(row=row, column=1, pady=3)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["jump_password"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        jpwd_frame = ttk.Frame(main_frame)
+        jpwd_frame.grid(row=row, column=1, sticky=tk.W, pady=3)
+        self.jump_pwd_entry = ttk.Entry(jpwd_frame, width=34, show="*")
+        self.jump_pwd_entry.pack(side=tk.LEFT)
+        if conn and conn.get("jump_password"):
+            try:
+                self.jump_pwd_entry.insert(0, decrypt_password(conn["jump_password"]))
+            except Exception:
+                self.jump_pwd_entry.insert(0, "")
+        self.jump_eye_btn = ttk.Button(jpwd_frame, text="\u25cf", width=3, command=self.toggle_jump_password)
+        self.jump_eye_btn.pack(side=tk.LEFT, padx=2)
+        row += 1
+
+        ttk.Label(main_frame, text=CN["extra_args"]).grid(row=row, column=0, sticky=tk.W, pady=3)
+        self.extra_var = tk.StringVar(value=conn["extra_args"] if conn else "")
+        ttk.Entry(main_frame, textvariable=self.extra_var, width=40).grid(row=row, column=1, pady=3)
+        row += 1
+
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.grid(row=row, column=0, columnspan=2, pady=15)
+        ttk.Button(btn_frame, text=CN["ok"], width=12, command=self.ok).pack(side=tk.LEFT, padx=5)
+        ttk.Button(btn_frame, text=CN["cancel"], width=12, command=self.cancel).pack(side=tk.LEFT, padx=5)
+        self.dialog.wait_window()
+
+    def toggle_password(self):
+        self.show_password.set(not self.show_password.get())
+        self.pwd_entry.config(show="" if self.show_password.get() else "*")
+        self.eye_btn.config(text="\u25cb" if self.show_password.get() else "\u25cf")
+
+    def toggle_jump_password(self):
+        current = self.jump_pwd_entry.cget("show")
+        self.jump_pwd_entry.config(show="" if current == "*" else "*")
+        self.jump_eye_btn.config(text="\u25cb" if current == "*" else "\u25cf")
+
+    def parse_ssh(self):
+        dialog = tk.Toplevel(self.dialog)
+        dialog.title(CN["ssh_from_cmd"])
+        dialog.geometry("500x150")
+        dialog.transient(self.dialog)
+        dialog.grab_set()
+        dialog.configure(bg=THEME["bg"])
+        ttk.Label(dialog, text=CN["paste_ssh"]).pack(pady=8)
+        cmd_text = tk.Text(dialog, height=3, width=60, bg=THEME["select"], fg=THEME["fg"], insertbackground=THEME["fg"])
+        cmd_text.pack(padx=10, fill=tk.X)
+
+        def do_parse():
+            cmd = cmd_text.get("1.0", tk.END).strip()
+            r = parse_ssh_command(cmd)
+            if r:
+                self.host_var.set(r["host"])
+                self.port_var.set(str(r["port"]))
+                self.user_var.set(r["username"])
+                self.jump_host_var.set(r["jump_host"])
+                self.jump_user_var.set(r["jump_user"])
+                self.extra_var.set(r["extra_args"])
+                dialog.destroy()
+            else:
+                messagebox.showerror(CN["error"], CN["parse_fail"], parent=dialog)
+
+        ttk.Button(dialog, text=CN["parse"], command=do_parse).pack(pady=8)
+        dialog.wait_window()
+
+    def collect_data(self):
+        data = {"name": self.name_var.get().strip(), "host": self.host_var.get().strip(), "username": self.user_var.get().strip()}
+        try:
+            data["port"] = int(self.port_var.get().strip() or "22")
+        except ValueError:
+            data["port"] = 22
+        pwd = self.pwd_entry.get()
+        if pwd:
+            data["password"] = encrypt_password(pwd)
+        data["jump_host"] = self.jump_host_var.get().strip()
+        data["jump_user"] = self.jump_user_var.get().strip()
+        jpwd = self.jump_pwd_entry.get()
+        if jpwd:
+            data["jump_password"] = encrypt_password(jpwd)
+        data["extra_args"] = self.extra_var.get().strip()
+        return data
+
+    def ok(self):
+        data = self.collect_data()
+        if not data["host"] or not data["username"]:
+            messagebox.showerror(CN["error"], CN["required"], parent=self.dialog)
+            return
+        self.result = data
+        self.dialog.destroy()
+
+    def cancel(self):
+        self.dialog.destroy()
+
+
+
+class OpenXtermApp:
+    def __init__(self, root):
+        self.root = root
+        root.title(CN["connection_mgr"])
+        root.geometry("850x580")
+        root.minsize(700, 450)
+        root.configure(bg=THEME["bg"])
+        init_db()
+        self.active_tunnels = {}
+        self.setup_ui()
+        self.refresh_list()
+
+    def setup_ui(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TLabel", background=THEME["bg"], foreground=THEME["fg"], font=("Segoe UI", 10))
+        style.configure("TFrame", background=THEME["bg"])
+        style.configure("TButton", background=THEME["btn_bg"], foreground=THEME["btn_fg"], borderwidth=1)
+        style.configure("Treeview", background=THEME["tree_bg"], foreground=THEME["tree_fg"], fieldbackground=THEME["tree_bg"])
+        style.configure("Treeview.Heading", background=THEME["header_bg"], foreground=THEME["fg"], relief="flat")
+        style.map("Treeview", background=[("selected", THEME["tree_sel"])], foreground=[("selected", THEME["fg"])])
+        style.map("TButton", background=[("active", THEME["accent"])], foreground=[("active", THEME["accent_fg"])])
+
+        toolbar = ttk.Frame(self.root)
+        toolbar.pack(fill=tk.X, padx=8, pady=(8, 0))
+        ttk.Button(toolbar, text=CN["add_conn"], command=self.add_connection).pack(side=tk.LEFT, padx=2)
+        ttk.Button(toolbar, text=CN["refresh"], command=self.refresh_list).pack(side=tk.LEFT, padx=2)
+
+        # Notebook (tabs)
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        # Tab 1: Connections list
+        conn_frame = ttk.Frame(self.notebook)
+        self.notebook.add(conn_frame, text=CN["conn_mgr_tab"])
+
+        columns = ("id", "name", "host", "port", "username", "jump")
+        self.tree = ttk.Treeview(conn_frame, columns=columns, show="headings", selectmode="browse")
+        self.tree.heading("id", text=CN["conn_id"])
+        self.tree.heading("name", text=CN["conn_name_col"])
+        self.tree.heading("host", text=CN["host_col"])
+        self.tree.heading("port", text=CN["port_col"])
+        self.tree.heading("username", text=CN["user_col"])
+        self.tree.heading("jump", text=CN["jump_col"])
+        self.tree.column("id", width=40, anchor=tk.CENTER)
+        self.tree.column("name", width=130)
+        self.tree.column("host", width=150)
+        self.tree.column("port", width=60, anchor=tk.CENTER)
+        self.tree.column("username", width=100)
+        self.tree.column("jump", width=150)
+
+        scrollbar = ttk.Scrollbar(conn_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Shortcut info label
+        hint_label = ttk.Label(self.root, text="提示: 双击连接 | 右键菜单", foreground=THEME["accent"], background=THEME["bg"])
+        hint_label.pack(fill=tk.X, padx=8)
+
+        action_frame = ttk.Frame(self.root)
+        action_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self.connect_btn = ttk.Button(action_frame, text=CN["connect"], width=15, command=self.connect_selected)
+        self.connect_btn.pack(side=tk.LEFT, padx=2)
+        ttk.Button(action_frame, text=CN["edit"], width=10, command=self.edit_connection).pack(side=tk.LEFT, padx=2)
+        ttk.Button(action_frame, text=CN["delete"], width=10, command=self.delete_connection).pack(side=tk.LEFT, padx=2)
+        ttk.Button(action_frame, text=CN["port_forward_mgr"], width=12, command=self.manage_port_forwards).pack(side=tk.LEFT, padx=2)
+
+        self.status_var = tk.StringVar(value=CN["ready"])
+        status_bar = ttk.Label(self.root, textvariable=self.status_var, relief=tk.FLAT, anchor=tk.W, background=THEME["header_bg"], foreground=THEME["fg"], padding=(8, 4))
+        status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        self.tree.bind("<Double-1>", lambda e: self.connect_selected())
+        self.tree.bind("<Button-3>", self.on_right_click)
+
+    def on_right_click(self, event):
+        sel = self.tree.identify_row(event.y)
+        if sel:
+            self.tree.selection_set(sel)
+            menu = tk.Menu(self.root, tearoff=0, bg=THEME["select"], fg=THEME["fg"])
+            menu.add_command(label=CN["connect"], command=self.connect_selected)
+            menu.add_command(label=CN["edit"], command=self.edit_connection)
+            menu.add_command(label=CN["port_forward_mgr"], command=self.manage_port_forwards)
+            menu.add_separator()
+            menu.add_command(label=CN["delete"], command=self.delete_connection)
+            menu.post(event.x_root, event.y_root)
+
+    def refresh_list(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        conns = list_connections()
+        for c in conns:
+            jump_display = c.get("jump_host", "") or ""
+            if jump_display and c.get("jump_user"):
+                jump_display = f"{c['jump_user']}@{jump_display}"
+            self.tree.insert("", tk.END, values=(c["id"], c["name"] or c["host"], c["host"], c["port"], c["username"], jump_display))
+        self.status_var.set(CN["total_conns"].format(len(conns)))
+
+    def get_selected_id(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo(CN["error"], CN["select_first"])
+            return None
+        return int(self.tree.item(sel[0], "values")[0])
+
+    def add_connection(self):
+        dlg = ConnectionDialog(self.root)
+        if dlg.result:
+            add_connection(dlg.result)
+            self.refresh_list()
+
+    def edit_connection(self):
+        cid = self.get_selected_id()
+        if cid is None:
+            return
+        conn = get_connection(cid)
+        dlg = ConnectionDialog(self.root, title=CN["edit_conn"], conn=conn)
+        if dlg.result:
+            update_connection(cid, dlg.result)
+            self.refresh_list()
+
+    def delete_connection(self):
+        cid = self.get_selected_id()
+        if cid is None:
+            return
+        if messagebox.askyesno(CN["confirm_delete"], CN["confirm_del_conn"], parent=self.root):
+            delete_connection(cid)
+            self.refresh_list()
+
+    def manage_port_forwards(self):
+        cid = self.get_selected_id()
+        if cid is None:
+            return
+        conn = get_connection(cid)
+        PortForwardManager(self.root, conn, cid, self)
+
+    def connect_selected(self):
+        cid = self.get_selected_id()
+        if cid is None:
+            return
+        conn = get_connection(cid)
+        self.connect_btn.config(state=tk.DISABLED)
+        threading.Thread(target=self.do_connect, args=(conn,), daemon=True).start()
+
+    def do_connect(self, conn):
+        try:
+            password = ""
+            if conn.get("password"):
+                try:
+                    password = decrypt_password(conn["password"])
+                except Exception:
+                    password = ""
+
+            jump_password = ""
+            if conn.get("jump_password"):
+                try:
+                    jump_password = decrypt_password(conn["jump_password"])
+                except Exception:
+                    jump_password = ""
+
+            host = conn.get("host", "")
+            port = int(conn.get("port", 22))
+            username = conn.get("username", "")
+            jump_host = conn.get("jump_host", "") or ""
+            jump_port = int(conn.get("jump_port", 22))
+            jump_user = conn.get("jump_user", "") or ""
+            extra_args = conn.get("extra_args", "") or ""
+
+            cid = conn.get("id")
+            forwards = get_port_forwards(cid) if cid else []
+            is_port_forward = bool(forwards) or "-L" in extra_args or "-R" in extra_args or "-D" in extra_args
+
+            def worker():
+                import paramiko
+                import re
+                import time
+
+                try:
+                    c = None
+                    jc = None
+                    if jump_host and jump_user:
+                        jc = paramiko.SSHClient()
+                        jc.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                        jc.connect(jump_host, port=jump_port, username=jump_user,
+                                   password=jump_password if jump_password else None,
+                                   look_for_keys=True, allow_agent=True, timeout=10,
+                                   disabled_algorithms={"auth": ["keyboard-interactive"]})
+                        sock = jc.get_transport().open_channel(
+                            "direct-tcpip", (host, port), (jump_host, 0))
+                        c = paramiko.SSHClient()
+                        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                        c.connect(host, port=port, username=username,
+                                   password=password if password else None,
+                                   sock=sock, look_for_keys=True, allow_agent=True, timeout=10,
+                                   disabled_algorithms={"auth": ["keyboard-interactive"]})
+                    else:
+                        c = paramiko.SSHClient()
+                        c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                        c.connect(host, port=port, username=username,
+                                   password=password if password else None,
+                                   look_for_keys=True, allow_agent=True, timeout=10,
+                                   disabled_algorithms={"auth": ["keyboard-interactive"]})
+
+                    self.root.after(0, lambda: self.status_var.set(f"{CN['connected']}: {host}"))
+                    self.root.after(0, lambda: self.connect_btn.config(state=tk.NORMAL))
+
+                    if is_port_forward:
+                        trans = c.get_transport()
+                        tunnel_msgs = []
+                        for fwd in forwards:
+                            ft = fwd["forward_type"]
+                            lp = fwd["listen_port"]
+                            dh = fwd["dest_host"]
+                            dp = fwd["dest_port"]
+                            lh = fwd.get("listen_host", "127.0.0.1") or "127.0.0.1"
+                            if ft == "L":
+                                trans.request_port_forward("", lp, (dh, dp))
+                                tunnel_msgs.append(f"{CN['local']} {lh}:{lp} -> {dh}:{dp}")
+                            elif ft == "R":
+                                trans.request_port_forward("remote", lp, (dh, dp))
+                                tunnel_msgs.append(f"{CN['remote']} *:{lp} -> {dh}:{dp}")
+                            elif ft == "D":
+                                pass
+
+                        for m in re.finditer(r"-L\s+(\d+):([^:]+):(\d+)", extra_args):
+                            lp = int(m.group(1))
+                            dh = m.group(2)
+                            dp = int(m.group(3))
+                            trans.request_port_forward("", lp, (dh, dp))
+                            tunnel_msgs.append(f"{CN['local']} localhost:{lp} -> {dh}:{dp}")
+
+                        if tunnel_msgs:
+                            msg = "\n".join(tunnel_msgs)
+                            self.root.after(0, lambda m=msg: messagebox.showinfo(CN["tunnel_established"], m, parent=self.root))
+                            self.root.after(0, lambda: self.status_var.set(CN["tunnel_active"].format(host)))
+
+                        self.root.after(0, lambda: self.active_tunnels.__setitem__(cid, {
+                            "client": c,
+                            "jump_client": jc,
+                            "transport": trans,
+                            "host": host,
+                        }))
+
+                        try:
+                            while True:
+                                time.sleep(30)
+                                if not trans.is_active():
+                                    break
+                        except Exception:
+                            pass
+                    else:
+                        ssh_cmd = build_ssh_command(conn)
+                        bat_path = os.path.join(os.environ.get("TEMP", "C:\\Temp"), "ox_ssh.bat")
+                        with open(bat_path, "w") as f:
+                            f.write("@echo off\n")
+                            f.write("title OpenXterm - " + host + "\n")
+                            f.write(ssh_cmd + "\n")
+                            f.write("echo.\n")
+                            f.write("pause\n")
+                        subprocess.Popen("start cmd /k \"" + bat_path + "\"", shell=True)
+                        self.root.after(0, lambda: self.connect_btn.config(state=tk.NORMAL))
+
+                except Exception as e:
+                    err_str = str(e)
+                    self.root.after(0, lambda e=err_str: self._show_error(e))
+                    self.root.after(0, lambda: self.status_var.set(f"{CN['error']}: {err_str}"))
+                    self.root.after(0, lambda: self.connect_btn.config(state=tk.NORMAL))
+
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+
+        except Exception as e:
+            self.root.after(0, lambda: self.status_var.set(f"{CN['error']}: {e}"))
+            self.root.after(0, lambda: self.connect_btn.config(state=tk.NORMAL))
+            self.tree.delete(item)
+        forwards = get_port_forwards(self.conn_id)
+        for f in forwards:
+            ftype = {"L": CN["local"], "R": CN["remote"], "D": CN["dynamic"]}.get(f["forward_type"], f["forward_type"])
+            listen = f"{f.get("listen_host", "127.0.0.1")}:{f["listen_port"]}"
+            dest = f"{f["dest_host"]}:{f["dest_port"]}" if f["forward_type"] != "D" else CN["socks"]
+            self.tree.insert("", tk.END, values=(f["id"], f["name"] or "-", ftype, listen, dest))
+
+
+
+class PortForwardManager:
+    def __init__(self, parent, conn, conn_id, app):
+        self.conn = conn
+        self.conn_id = conn_id
+        self.app = app
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title(f"{CN['forward_mgr_title']} - {conn.get('name') or conn.get('host')}")
+        self.dialog.geometry("600x400")
+        self.dialog.minsize(500, 300)
+        self.dialog.transient(parent)
+        self.dialog.grab_set()
+        self.dialog.configure(bg=THEME["bg"])
+
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("TLabel", background=THEME["bg"], foreground=THEME["fg"], font=("Segoe UI", 10))
+        style.configure("TFrame", background=THEME["bg"])
+        style.configure("TButton", background=THEME["btn_bg"], foreground=THEME["btn_fg"])
+        style.map("TButton", background=[("active", THEME["accent"])], foreground=[("active", THEME["accent_fg"])])
+        style.configure("Treeview", background=THEME["tree_bg"], foreground=THEME["tree_fg"], fieldbackground=THEME["tree_bg"])
+        style.configure("Treeview.Heading", background=THEME["header_bg"], foreground=THEME["fg"])
+        style.map("Treeview", background=[("selected", THEME["tree_sel"])], foreground=[("selected", THEME["fg"])])
+
+        main_frame = ttk.Frame(self.dialog, padding=10)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(main_frame, text=f"{conn.get('name') or conn.get('host')} ({conn['username']}@{conn['host']})",
+        font=("", 11, "bold")).pack(anchor=tk.W, pady=(0, 8))
+
+        tbar = ttk.Frame(main_frame)
+        tbar.pack(fill=tk.X, pady=(0, 5))
+        ttk.Button(tbar, text=CN["add_forward_btn"], command=self.add_forward).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tbar, text=CN["edit"], command=self.edit_forward).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tbar, text=CN["delete"], command=self.delete_forward).pack(side=tk.LEFT, padx=2)
+        ttk.Button(tbar, text=CN["onekey_connect"], command=self.connect_and_forward).pack(side=tk.RIGHT, padx=2)
+
+        columns = ("id", "name", "type", "listen", "dest")
+        self.tree = ttk.Treeview(main_frame, columns=columns, show="headings", selectmode="browse", height=8)
+        self.tree.heading("id", text="ID")
+        self.tree.heading("name", text=CN["forward_name_col"])
+        self.tree.heading("type", text=CN["forward_type_col"])
+        self.tree.heading("listen", text=CN["forward_listen_col"])
+        self.tree.heading("dest", text=CN["forward_dest_col"])
+        self.tree.column("id", width=30, anchor=tk.CENTER)
+        self.tree.column("name", width=120)
+        self.tree.column("type", width=60, anchor=tk.CENTER)
+        self.tree.column("listen", width=130)
+        self.tree.column("dest", width=150)
+
+        scrollbar = ttk.Scrollbar(main_frame, orient=tk.VERTICAL, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.refresh_forwards()
+
+    def refresh_forwards(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+        forwards = get_port_forwards(self.conn_id)
+        for f in forwards:
+            ftype = {"L": CN["local"], "R": CN["remote"], "D": CN["dynamic"]}.get(f["forward_type"], f["forward_type"])
+            listen = f"{f.get("listen_host", "127.0.0.1")}:{f["listen_port"]}"
+            dest = f"{f["dest_host"]}:{f["dest_port"]}" if f["forward_type"] != "D" else CN["socks"]
+            self.tree.insert("", tk.END, values=(f["id"], f["name"] or "-", ftype, listen, dest))
+
+    def get_selected_fwd(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo(CN["error"], CN["select_forward_first"], parent=self.dialog)
+            return None
+
+    def add_forward(self):
+        dlg = PortForwardDialog(self.dialog, self.conn_id)
+        if dlg.result:
+            add_port_forward(dlg.result)
+            self.refresh_forwards()
+
+    def edit_forward(self):
+        fid = self.get_selected_fwd()
+        if fid is None:
+            return
+        forwards = get_port_forwards(self.conn_id)
+        fwd = next((f for f in forwards if f["id"] == fid), None)
+        if not fwd:
+            return
+        dlg = PortForwardDialog(self.dialog, self.conn_id, title=CN["edit_forward"], fwd=fwd)
+        if dlg.result:
+            update_port_forward(fid, dlg.result)
+            self.refresh_forwards()
+
+    def delete_forward(self):
+        fid = self.get_selected_fwd()
+        if fid is None:
+            return
+        delete_port_forward(fid)
+        self.refresh_forwards()
+
+    def connect_and_forward(self):
+        self.dialog.destroy()
+        self.app.connect_selected()
+
+
+def main():
+    root = tk.Tk()
+    app = OpenXtermApp(root)
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
